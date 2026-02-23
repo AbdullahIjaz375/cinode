@@ -1,0 +1,43 @@
+# =============================================================================
+# Deploy to Fly.io
+# =============================================================================
+# Deploys on push to main using flyctl.
+# Requires a Dockerfile in the project root.
+#
+# REQUIRED SECRETS:
+#   FLY_API_TOKEN  - From https://fly.io/user/personal_access_tokens
+#
+# SETUP:
+#   1. Install flyctl: https://fly.io/docs/hands-on/install-flyctl/
+#   2. Run: fly launch (creates fly.toml)
+#   3. Add FLY_API_TOKEN to GitHub Secrets
+# =============================================================================
+
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: flyio-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly.io
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy --remote-only
+          echo "✅ Deployed to Fly.io"

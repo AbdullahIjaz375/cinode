@@ -1,0 +1,416 @@
+# =============================================================================
+# CI Pipeline - Comprehensive Code Quality & Security Checks
+# =============================================================================
+# Runs on PRs to dev/main. Checks linting, formatting, build, tests,
+# security vulnerabilities, code duplication, and dependency review.
+#
+# REUSE: Copy .github/ folder + config files to any Node.js project.
+#        Workflows auto-detect available scripts (build, test, lint).
+# =============================================================================
+
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches: [dev, main, master]
+  push:
+    branches: [dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "__NODE_VERSION__"
+
+jobs:
+  # ===========================================================================
+  # 1. CODE QUALITY - Linting & Formatting
+  # ===========================================================================
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+__PNPM_SETUP__
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "__PKG_CACHE__"
+
+      - name: Install dependencies
+        run: __PKG_INSTALL_CMD__ --ignore-scripts
+
+      - name: Check if ESLint is configured
+        id: eslint-check
+        run: |
+          if [ -f .eslintrc.json ] || [ -f .eslintrc.js ] || [ -f .eslintrc.yml ] || [ -f .eslintrc ] || [ -f eslint.config.js ] || [ -f eslint.config.mjs ]; then
+            echo "configured=true" >> $GITHUB_OUTPUT
+          elif grep -q '"eslintConfig"' package.json 2>/dev/null; then
+            echo "configured=true" >> $GITHUB_OUTPUT
+          else
+            echo "configured=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run ESLint
+        if: steps.eslint-check.outputs.configured == 'true'
+        run: |
+          if npm run lint --if-present 2>/dev/null; then
+            echo "✅ ESLint passed"
+          else
+            echo "❌ ESLint found issues"
+            exit 1
+          fi
+
+      - name: Check if Prettier is configured
+        id: prettier-check
+        run: |
+          if [ -f .prettierrc ] || [ -f .prettierrc.json ] || [ -f .prettierrc.js ] || [ -f .prettierrc.yml ] || [ -f prettier.config.js ]; then
+            echo "configured=true" >> $GITHUB_OUTPUT
+          elif grep -q '"prettier"' package.json 2>/dev/null; then
+            echo "configured=true" >> $GITHUB_OUTPUT
+          else
+            echo "configured=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Prettier check
+        if: steps.prettier-check.outputs.configured == 'true'
+        run: |
+          if npm run format:check --if-present 2>/dev/null; then
+            echo "✅ Prettier passed"
+          else
+            npx prettier --check "**/*.{js,jsx,ts,tsx,json,md}" --ignore-path .gitignore 2>/dev/null || {
+              echo "❌ Formatting issues found. Run 'npx prettier --write .' locally."
+              exit 1
+            }
+          fi
+
+  # ===========================================================================
+  # 2. BUILD VERIFICATION
+  # ===========================================================================
+  build:
+    name: Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+__PNPM_SETUP__
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "__PKG_CACHE__"
+
+      - name: Install dependencies
+        run: __PKG_INSTALL_CMD__ --ignore-scripts
+
+      - name: Check for build script
+        id: build-check
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)" 2>/dev/null; then
+            echo "has_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run build
+        if: steps.build-check.outputs.has_build == 'true'
+        run: npm run build
+
+      - name: Verify application starts (non-build projects)
+        if: steps.build-check.outputs.has_build == 'false'
+        run: |
+          echo "Running syntax validation..."
+          find . -name "*.js" -not -path "./node_modules/*" -not -path "./.git/*" | head -100 | while read file; do
+            node --check "$file" 2>&1 || { echo "❌ Syntax error in $file"; exit 1; }
+          done
+          echo "✅ All files pass syntax check"
+
+  # ===========================================================================
+  # 3. TESTS
+  # ===========================================================================
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+__PNPM_SETUP__
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "__PKG_CACHE__"
+
+      - name: Install dependencies
+        run: __PKG_INSTALL_CMD__
+
+      - name: Check for test framework
+        id: test-check
+        run: |
+          HAS_JEST=false
+          HAS_MOCHA=false
+          HAS_VITEST=false
+          HAS_TEST_SCRIPT=false
+
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test && p.scripts.test !== 'echo \"Error: no test specified\" && exit 1' ? 0 : 1)" 2>/dev/null; then
+            HAS_TEST_SCRIPT=true
+          fi
+
+          grep -q '"jest"' package.json 2>/dev/null && HAS_JEST=true
+          grep -q '"mocha"' package.json 2>/dev/null && HAS_MOCHA=true
+          grep -q '"vitest"' package.json 2>/dev/null && HAS_VITEST=true
+
+          echo "has_test_script=$HAS_TEST_SCRIPT" >> $GITHUB_OUTPUT
+          echo "has_jest=$HAS_JEST" >> $GITHUB_OUTPUT
+          echo "has_mocha=$HAS_MOCHA" >> $GITHUB_OUTPUT
+          echo "has_vitest=$HAS_VITEST" >> $GITHUB_OUTPUT
+
+      - name: Run tests
+        if: steps.test-check.outputs.has_test_script == 'true'
+        run: npm test
+        env:
+          NODE_ENV: test
+          CI: true
+
+      - name: Run tests with coverage (Jest)
+        if: steps.test-check.outputs.has_jest == 'true' && steps.test-check.outputs.has_test_script == 'true'
+        continue-on-error: true
+        run: npx jest --coverage --ci --passWithNoTests 2>/dev/null || true
+
+      - name: Skip notice
+        if: steps.test-check.outputs.has_test_script == 'false'
+        run: echo "⚠️ No test script found. Consider adding tests to improve code quality."
+
+  # ===========================================================================
+  # 4. SECURITY - npm audit & vulnerability scanning
+  # ===========================================================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+__PNPM_SETUP__
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "__PKG_CACHE__"
+
+      - name: Install dependencies
+        run: __PKG_INSTALL_CMD__ --ignore-scripts
+
+      - name: npm audit (production deps)
+        run: |
+          echo "🔍 Scanning production dependencies..."
+          npm audit --production --audit-level=high 2>&1 || {
+            echo "⚠️ High/Critical vulnerabilities found in production dependencies"
+            echo "Run 'npm audit fix' locally to resolve"
+            exit 1
+          }
+          echo "✅ No high/critical vulnerabilities in production dependencies"
+
+      - name: npm audit (all deps - advisory)
+        continue-on-error: true
+        run: |
+          echo "🔍 Scanning all dependencies (advisory)..."
+          npm audit --audit-level=moderate 2>&1 || {
+            echo "⚠️ Moderate vulnerabilities found (non-blocking)"
+          }
+
+      - name: Check for known vulnerable patterns
+        run: |
+          echo "🔍 Checking for hardcoded secrets..."
+          ISSUES=0
+
+          if grep -rn "password\s*=\s*['\"]" --include="*.js" --include="*.ts" --include="*.jsx" --include="*.tsx" \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=test --exclude-dir=__tests__ . 2>/dev/null | \
+            grep -v "process.env" | grep -v "config\." | grep -v "\.example" | grep -v "placeholder" | head -5; then
+            echo "⚠️ Possible hardcoded passwords detected (review above)"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          if grep -rn "api[_-]?key\s*=\s*['\"][a-zA-Z0-9]" --include="*.js" --include="*.ts" \
+            --exclude-dir=node_modules --exclude-dir=.git . 2>/dev/null | \
+            grep -v "process.env" | grep -v "config\." | grep -v "\.example" | head -5; then
+            echo "⚠️ Possible hardcoded API keys detected (review above)"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          if [ $ISSUES -gt 0 ]; then
+            echo "⚠️ $ISSUES potential secret patterns found - please review"
+          else
+            echo "✅ No hardcoded secrets detected"
+          fi
+
+      - name: Check for .env files in repo
+        run: |
+          if find . -name ".env" -not -path "./node_modules/*" -not -path "./.git/*" | grep -q .; then
+            echo "❌ .env file found in repository! This should be in .gitignore"
+            exit 1
+          fi
+          echo "✅ No .env files committed"
+
+  # ===========================================================================
+  # 5. CODE DUPLICATION CHECK
+  # ===========================================================================
+  duplication:
+    name: Code Duplication
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install jscpd
+        run: npm install -g jscpd
+
+      - name: Check for jscpd config
+        id: jscpd-config
+        run: |
+          if [ -f .jscpd.json ]; then
+            echo "has_config=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_config=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run duplication check (with config)
+        if: steps.jscpd-config.outputs.has_config == 'true'
+        continue-on-error: true
+        run: jscpd .
+
+      - name: Run duplication check (default)
+        if: steps.jscpd-config.outputs.has_config == 'false'
+        continue-on-error: true
+        run: |
+          jscpd . \
+            --ignore "node_modules,coverage,.git,dist,build,.next,public,assets,locales,docs" \
+            --min-lines 10 \
+            --min-tokens 50 \
+            --threshold 10 \
+            --reporters "console" \
+            --format "javascript,typescript,jsx,tsx"
+
+  # ===========================================================================
+  # 6. CODE COMPLEXITY & DEBT ANALYSIS
+  # ===========================================================================
+  code-quality:
+    name: Code Quality & Debt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Analyze code complexity
+        continue-on-error: true
+        run: |
+          npm install -g cr
+
+          echo "📊 Code Complexity Report"
+          echo "========================="
+
+          FILES=$(find . \
+            -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" | \
+            grep -v node_modules | \
+            grep -v ".git" | \
+            grep -v "dist/" | \
+            grep -v "build/" | \
+            grep -v ".next/" | \
+            grep -v "coverage/" | \
+            grep -v "__tests__" | \
+            grep -v "test/" | \
+            grep -v "docs/" | \
+            head -50)
+
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | xargs cr 2>/dev/null || echo "⚠️ Could not analyze some files"
+          fi
+
+      - name: Check for large files
+        run: |
+          echo "📏 Checking for oversized source files..."
+          LARGE_FILES=$(find . \
+            \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/dist/*" \
+            -not -path "*/build/*" \
+            -not -path "*/.next/*" \
+            -size +500k 2>/dev/null)
+
+          if [ -n "$LARGE_FILES" ]; then
+            echo "⚠️ Large source files detected (>500KB):"
+            echo "$LARGE_FILES"
+            echo "Consider breaking these into smaller modules."
+          else
+            echo "✅ No oversized source files"
+          fi
+
+      - name: Check for TODO/FIXME/HACK comments
+        continue-on-error: true
+        run: |
+          echo "📝 Technical Debt Markers"
+          echo "========================="
+
+          TODO_COUNT=$(grep -rn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" \
+            --include="*.js" --include="*.ts" --include="*.jsx" --include="*.tsx" \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+            --exclude-dir=build --exclude-dir=.next . 2>/dev/null | wc -l | tr -d ' ')
+
+          echo "Found $TODO_COUNT technical debt markers (TODO/FIXME/HACK/XXX/WORKAROUND)"
+
+          if [ "$TODO_COUNT" -gt 0 ]; then
+            echo ""
+            echo "Top items:"
+            grep -rn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" \
+              --include="*.js" --include="*.ts" --include="*.jsx" --include="*.tsx" \
+              --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+              --exclude-dir=build --exclude-dir=.next . 2>/dev/null | head -20
+          fi
+
+      - name: Outdated dependencies check
+        continue-on-error: true
+        run: |
+          echo "📦 Checking for outdated dependencies..."
+          npm install -g npm-check 2>/dev/null
+          npm-check --skip-unused 2>/dev/null || npm outdated 2>/dev/null || echo "Could not check outdated deps"
+
+  # ===========================================================================
+  # 7. PR STATUS CHECK (gate for merging)
+  # ===========================================================================
+  pr-gate:
+    name: PR Gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [lint, build, test, security, duplication, code-quality]
+    steps:
+      - name: All checks passed
+        run: |
+          echo "✅ All CI checks passed!"
+          echo ""
+          echo "Summary:"
+          echo "  ✅ Linting & Formatting"
+          echo "  ✅ Build Verification"
+          echo "  ✅ Tests"
+          echo "  ✅ Security Scan"
+          echo "  ✅ Code Duplication Check"
+          echo "  ✅ Code Quality & Debt Analysis"
+          echo ""
+          echo "This PR is ready for review and merge."

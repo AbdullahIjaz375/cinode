@@ -1,0 +1,38 @@
+# =============================================================================
+# Deploy to Render
+# =============================================================================
+# Triggers a deploy via Render's deploy hook on push to main.
+# Render handles building and running automatically.
+#
+# REQUIRED SECRETS:
+#   RENDER_DEPLOY_HOOK_URL - From Render dashboard > Service > Settings > Deploy Hook
+# =============================================================================
+
+name: Deploy to Render
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: render-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        run: |
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ secrets.RENDER_DEPLOY_HOOK_URL }}")
+
+          if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "201" ]; then
+            echo "✅ Deploy triggered on Render (HTTP $RESPONSE)"
+            echo "Monitor progress at https://dashboard.render.com"
+          else
+            echo "❌ Failed to trigger deploy (HTTP $RESPONSE)"
+            exit 1
+          fi

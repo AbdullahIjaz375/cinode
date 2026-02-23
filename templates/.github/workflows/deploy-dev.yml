@@ -1,0 +1,271 @@
+# =============================================================================
+# Deploy to Development Environment
+# =============================================================================
+# Triggers on merge to dev branch. Deploys via SSH to EC2/VPS.
+#
+# REQUIRED SECRETS (set in GitHub repo Settings > Secrets):
+#   DEV_SSH_HOST        - Server IP or hostname
+#   DEV_SSH_USER        - SSH username
+#   DEV_SSH_KEY         - SSH private key (full content)
+#   DEV_SSH_PORT        - SSH port (optional, defaults to 22)
+#   DEV_DEPLOY_PATH     - Deployment path on server (e.g., /home/ubuntu/app)
+#   DEV_PM2_APP_NAME    - PM2 process name (e.g., my-app-dev)
+#
+# OPTIONAL SECRETS (for projects that need them):
+#   DEV_ENV_FILE        - Base64-encoded .env file content
+#   DEV_FIREBASE_KEY    - Base64-encoded Firebase service account JSON
+# =============================================================================
+
+name: Deploy to Dev
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      skip_ci:
+        description: "Skip CI checks"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "20"
+  APP_NAME: ${{ secrets.DEV_PM2_APP_NAME || 'app-dev' }}
+
+jobs:
+  # ===========================================================================
+  # Pre-deploy validation
+  # ===========================================================================
+  validate:
+    name: Pre-Deploy Validation
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.check.outputs.should_deploy }}
+    steps:
+      - name: Validate required secrets
+        id: check
+        run: |
+          MISSING=""
+          if [ -z "${{ secrets.DEV_SSH_HOST }}" ]; then MISSING="$MISSING DEV_SSH_HOST"; fi
+          if [ -z "${{ secrets.DEV_SSH_USER }}" ]; then MISSING="$MISSING DEV_SSH_USER"; fi
+          if [ -z "${{ secrets.DEV_SSH_KEY }}" ]; then MISSING="$MISSING DEV_SSH_KEY"; fi
+          if [ -z "${{ secrets.DEV_DEPLOY_PATH }}" ]; then MISSING="$MISSING DEV_DEPLOY_PATH"; fi
+
+          if [ -n "$MISSING" ]; then
+            echo "❌ Missing required secrets:$MISSING"
+            echo "Configure these in GitHub Settings > Secrets and variables > Actions"
+            echo "should_deploy=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "should_deploy=true" >> $GITHUB_OUTPUT
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install and verify
+        run: |
+          npm ci --ignore-scripts
+          echo "✅ Dependencies installed successfully"
+
+  # ===========================================================================
+  # Deploy
+  # ===========================================================================
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: needs.validate.outputs.should_deploy == 'true'
+    environment:
+      name: development
+      url: http://${{ secrets.DEV_SSH_HOST }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEV_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ secrets.DEV_SSH_PORT || 22 }} -H ${{ secrets.DEV_SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Test SSH connection
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -p ${{ secrets.DEV_SSH_PORT || 22 }} \
+            -o ConnectTimeout=10 \
+            -o StrictHostKeyChecking=no \
+            ${{ secrets.DEV_SSH_USER }}@${{ secrets.DEV_SSH_HOST }} \
+            "echo '✅ SSH connection successful'"
+
+      - name: Create deployment package
+        run: |
+          git archive --format=tar.gz --output=deploy.tar.gz HEAD
+          echo "📦 Package size: $(du -h deploy.tar.gz | cut -f1)"
+
+      - name: Upload deployment package
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            -P ${{ secrets.DEV_SSH_PORT || 22 }} \
+            deploy.tar.gz \
+            ${{ secrets.DEV_SSH_USER }}@${{ secrets.DEV_SSH_HOST }}:/tmp/deploy.tar.gz
+
+      - name: Upload environment file
+        if: ${{ secrets.DEV_ENV_FILE != '' }}
+        run: |
+          echo "${{ secrets.DEV_ENV_FILE }}" | base64 -d > /tmp/.env
+          scp -i ~/.ssh/deploy_key \
+            -P ${{ secrets.DEV_SSH_PORT || 22 }} \
+            /tmp/.env \
+            ${{ secrets.DEV_SSH_USER }}@${{ secrets.DEV_SSH_HOST }}:${{ secrets.DEV_DEPLOY_PATH }}/.env
+
+      - name: Deploy to server
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -p ${{ secrets.DEV_SSH_PORT || 22 }} \
+            ${{ secrets.DEV_SSH_USER }}@${{ secrets.DEV_SSH_HOST }} << 'DEPLOY_SCRIPT'
+
+          set -e
+          DEPLOY_PATH="${{ secrets.DEV_DEPLOY_PATH }}"
+          APP_NAME="${{ env.APP_NAME }}"
+          BACKUP_DIR="$DEPLOY_PATH/../backups"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+          echo "🚀 Starting deployment..."
+
+          # Create backup
+          mkdir -p "$BACKUP_DIR"
+          if [ -d "$DEPLOY_PATH" ] && [ "$(ls -A $DEPLOY_PATH 2>/dev/null)" ]; then
+            echo "📋 Creating backup: backup_$TIMESTAMP"
+            tar -czf "$BACKUP_DIR/backup_$TIMESTAMP.tar.gz" -C "$DEPLOY_PATH" . 2>/dev/null || true
+
+            # Keep only last 5 backups
+            ls -t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
+          fi
+
+          # Extract new code
+          mkdir -p "$DEPLOY_PATH"
+          cd "$DEPLOY_PATH"
+          tar -xzf /tmp/deploy.tar.gz
+          rm -f /tmp/deploy.tar.gz
+
+          # Install dependencies
+          echo "📦 Installing dependencies..."
+          npm ci --production 2>&1 | tail -5
+
+          # Run build if available
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)" 2>/dev/null; then
+            echo "🔨 Running build..."
+            npm run build
+          fi
+
+          # Restart application with PM2
+          echo "♻️ Restarting application..."
+          if command -v pm2 &>/dev/null; then
+            if pm2 describe "$APP_NAME" > /dev/null 2>&1; then
+              pm2 restart "$APP_NAME" --update-env
+            else
+              # Detect entry point
+              ENTRY=$(node -e "const p=require('./package.json'); console.log(p.main || 'server.js')")
+              pm2 start "$ENTRY" --name "$APP_NAME"
+            fi
+            pm2 save
+          else
+            echo "⚠️ PM2 not found. Install with: npm install -g pm2"
+            exit 1
+          fi
+
+          echo "✅ Deployment complete!"
+          DEPLOY_SCRIPT
+
+      - name: Health check
+        run: |
+          echo "🏥 Running health check..."
+          MAX_RETRIES=5
+          RETRY_DELAY=10
+          HEALTH_URL="http://${{ secrets.DEV_SSH_HOST }}:${{ secrets.DEV_PORT || 5000 }}/health"
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i/$MAX_RETRIES..."
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" 2>/dev/null || echo "000")
+
+            if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ]; then
+              echo "✅ Health check passed (HTTP $HTTP_STATUS)"
+              exit 0
+            fi
+
+            echo "⏳ Server not ready (HTTP $HTTP_STATUS), waiting ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          done
+
+          echo "⚠️ Health check inconclusive - verify manually"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "🔄 Attempting rollback..."
+          ssh -i ~/.ssh/deploy_key \
+            -p ${{ secrets.DEV_SSH_PORT || 22 }} \
+            ${{ secrets.DEV_SSH_USER }}@${{ secrets.DEV_SSH_HOST }} << 'ROLLBACK_SCRIPT'
+
+          DEPLOY_PATH="${{ secrets.DEV_DEPLOY_PATH }}"
+          BACKUP_DIR="$DEPLOY_PATH/../backups"
+          APP_NAME="${{ env.APP_NAME }}"
+
+          LATEST_BACKUP=$(ls -t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | head -1)
+          if [ -n "$LATEST_BACKUP" ]; then
+            echo "Restoring from: $LATEST_BACKUP"
+            cd "$DEPLOY_PATH"
+            tar -xzf "$LATEST_BACKUP"
+            npm ci --production 2>/dev/null
+            pm2 restart "$APP_NAME" --update-env 2>/dev/null || true
+            echo "✅ Rollback complete"
+          else
+            echo "❌ No backup found for rollback"
+          fi
+          ROLLBACK_SCRIPT
+
+      - name: Cleanup SSH
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  # ===========================================================================
+  # Deployment Summary
+  # ===========================================================================
+  summary:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+    steps:
+      - name: Deployment summary
+        run: |
+          echo "=============================="
+          echo "  DEV DEPLOYMENT SUMMARY"
+          echo "=============================="
+          echo ""
+          echo "Branch:     ${{ github.ref_name }}"
+          echo "Commit:     ${{ github.sha }}"
+          echo "Author:     ${{ github.actor }}"
+          echo "Status:     ${{ needs.deploy.result }}"
+          echo "Timestamp:  $(date -u)"
+          echo ""
+
+          if [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "✅ Deployment successful!"
+          elif [ "${{ needs.deploy.result }}" = "skipped" ]; then
+            echo "⏭️ Deployment skipped (missing secrets or validation failed)"
+          else
+            echo "❌ Deployment failed - check logs above"
+          fi

@@ -1,0 +1,109 @@
+# =============================================================================
+# Build & Deploy (Docker)
+# =============================================================================
+# Builds a Docker image, pushes to GitHub Container Registry (GHCR),
+# and optionally deploys to a server via SSH docker compose.
+#
+# GHCR is free and uses your existing GITHUB_TOKEN - no extra setup needed.
+#
+# OPTIONAL SECRETS (for SSH deployment after push):
+#   DEPLOY_SSH_HOST    - Server IP or hostname
+#   DEPLOY_SSH_USER    - SSH username
+#   DEPLOY_SSH_KEY     - SSH private key
+#   DEPLOY_SSH_PORT    - SSH port (default: 22)
+#   DEPLOY_PATH        - Path to docker-compose.yml on server
+# =============================================================================
+
+name: Build & Deploy (Docker)
+
+on:
+  push:
+    branches: [dev, main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ===========================================================================
+  # Build and push Docker image
+  # ===========================================================================
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # Deploy via SSH (optional - only runs if SSH secrets are configured)
+  # ===========================================================================
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Check if deployment is configured
+        id: check
+        run: |
+          if [ -z "${{ secrets.DEPLOY_SSH_HOST }}" ]; then
+            echo "configured=false" >> $GITHUB_OUTPUT
+            echo "⏭️ No SSH secrets configured - skipping deployment"
+            echo "Image pushed to GHCR successfully. Deploy manually or add SSH secrets."
+          else
+            echo "configured=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to server
+        if: steps.check.outputs.configured == 'true'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f
+            echo "✅ Deployed successfully"

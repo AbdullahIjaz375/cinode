@@ -1,0 +1,23 @@
+{
+  "threshold": 10,
+  "reporters": ["console"],
+  "ignore": [
+    "node_modules",
+    "coverage",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    "public",
+    "assets",
+    "locales",
+    "docs",
+    "**/*.min.js",
+    "**/*.json",
+    "**/*.md"
+  ],
+  "format": ["javascript", "typescript", "jsx", "tsx"],
+  "minLines": 10,
+  "minTokens": 50,
+  "absolute": true
+}

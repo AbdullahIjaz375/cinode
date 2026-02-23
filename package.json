@@ -1,0 +1,33 @@
+{
+  "name": "setup-pipeline",
+  "version": "2.0.0",
+  "description": "One-command CI/CD pipeline generator for Node.js. GitHub Actions, Docker, Vercel, Railway, Render, Fly.io, SSH/PM2. Husky pre-commit hooks. ESLint, Prettier, security scanning, code duplication. Zero dependencies.",
+  "main": "bin/setup-pipeline.js",
+  "bin": {
+    "setup-pipeline": "./bin/setup-pipeline.js"
+  },
+  "files": [
+    "bin/",
+    "templates/"
+  ],
+  "scripts": {
+    "test": "node bin/setup-pipeline.js --help"
+  },
+  "keywords": [
+    "ci", "cd", "cicd", "pipeline", "github-actions", "deployment",
+    "eslint", "prettier", "security", "code-quality", "nodejs", "devops",
+    "automation", "scaffold", "generator",
+    "docker", "dockerfile", "vercel", "railway", "render", "flyio", "fly-io",
+    "husky", "lint-staged", "pre-commit", "ssh", "pm2",
+    "nextjs", "express", "typescript", "pnpm", "yarn"
+  ],
+  "author": "Abdullah Ijaz",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AbdullahIjaz375/setup-pipeline.git"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

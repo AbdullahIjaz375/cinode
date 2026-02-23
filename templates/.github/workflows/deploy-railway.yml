@@ -1,0 +1,44 @@
+# =============================================================================
+# Deploy to Railway
+# =============================================================================
+# Deploys on push to main. Railway handles builds automatically.
+#
+# REQUIRED SECRETS:
+#   RAILWAY_TOKEN      - From https://railway.app/account/tokens
+#
+# OPTIONAL SECRETS:
+#   RAILWAY_SERVICE    - Service name (if multiple services in project)
+# =============================================================================
+
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: railway-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -n "${{ secrets.RAILWAY_SERVICE }}" ]; then
+            railway up --service "${{ secrets.RAILWAY_SERVICE }}" --detach
+          else
+            railway up --detach
+          fi
+          echo "✅ Deployed to Railway"
